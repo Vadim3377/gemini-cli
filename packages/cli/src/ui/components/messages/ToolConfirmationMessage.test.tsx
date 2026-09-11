@@ -30,10 +30,15 @@ vi.mock('../../contexts/ToolActionsContext.js', async (importOriginal) => {
 
 describe('ToolConfirmationMessage', () => {
   const mockConfirm = vi.fn();
-  vi.mocked(useToolActions).mockReturnValue({
-    confirm: mockConfirm,
-    cancel: vi.fn(),
-    isDiffingEnabled: false,
+  beforeEach(() => {
+    vi.mocked(useToolActions).mockReturnValue({
+      confirm: mockConfirm,
+      cancel: vi.fn(),
+      isDiffingEnabled: false,
+      isExpanded: vi.fn().mockReturnValue(false),
+      toggleExpansion: vi.fn(),
+      toggleAllExpansion: vi.fn(),
+    });
   });
 
   const mockConfig = {
@@ -59,6 +64,7 @@ describe('ToolConfirmationMessage', () => {
         getPreferredEditor={vi.fn()}
         availableTerminalHeight={30}
         terminalWidth={80}
+        toolName="shell"
       />,
     );
 
@@ -85,6 +91,7 @@ describe('ToolConfirmationMessage', () => {
         getPreferredEditor={vi.fn()}
         availableTerminalHeight={30}
         terminalWidth={80}
+        toolName="shell"
       />,
     );
 
@@ -108,6 +115,7 @@ describe('ToolConfirmationMessage', () => {
         getPreferredEditor={vi.fn()}
         availableTerminalHeight={30}
         terminalWidth={80}
+        toolName="shell"
       />,
     );
 
@@ -137,6 +145,7 @@ describe('ToolConfirmationMessage', () => {
         getPreferredEditor={vi.fn()}
         availableTerminalHeight={30}
         terminalWidth={80}
+        toolName="shell"
       />,
     );
 
@@ -166,6 +175,7 @@ describe('ToolConfirmationMessage', () => {
         getPreferredEditor={vi.fn()}
         availableTerminalHeight={30}
         terminalWidth={80}
+        toolName="shell"
       />,
     );
 
@@ -194,6 +204,7 @@ describe('ToolConfirmationMessage', () => {
         getPreferredEditor={vi.fn()}
         availableTerminalHeight={30}
         terminalWidth={80}
+        toolName="shell"
       />,
     );
 
@@ -222,6 +233,7 @@ describe('ToolConfirmationMessage', () => {
         getPreferredEditor={vi.fn()}
         availableTerminalHeight={30}
         terminalWidth={80}
+        toolName="shell"
       />,
     );
 
@@ -250,6 +262,7 @@ describe('ToolConfirmationMessage', () => {
         getPreferredEditor={vi.fn()}
         availableTerminalHeight={30}
         terminalWidth={80}
+        toolName="shell"
       />,
     );
     await result.waitUntilReady();
@@ -262,6 +275,108 @@ describe('ToolConfirmationMessage', () => {
 
     await expect(result).toMatchSvgSnapshot();
     result.unmount();
+  });
+
+  it('should use the tool name for display in the confirmation question', async () => {
+    const confirmationDetails: SerializableConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Execution',
+      command: '# This is a comment\necho "hello"',
+      rootCommand: 'echo',
+      rootCommands: ['echo'],
+    };
+
+    const { lastFrame, unmount } = await renderWithProviders(
+      <ToolConfirmationMessage
+        callId="test-call-id"
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        getPreferredEditor={vi.fn()}
+        availableTerminalHeight={30}
+        terminalWidth={80}
+        toolName="shell"
+      />,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('Allow execution of [Shell]?');
+    unmount();
+  });
+
+  describe('tool name humanization', () => {
+    const cases = [
+      {
+        toolName: 'run_shell_command',
+        expected: 'Allow execution of [Shell]?',
+        desc: 'humanize run_shell_command to Shell',
+      },
+      {
+        toolName: 'shell',
+        expected: 'Allow execution of [Shell]?',
+        desc: 'humanize shell to Shell',
+      },
+      {
+        toolName: 'grep_search',
+        expected: 'Allow execution of [grep_search]?',
+        desc: 'keep raw name for non-shell tools',
+      },
+    ];
+
+    for (const { toolName, expected, desc } of cases) {
+      it(`should ${desc}`, async () => {
+        const confirmationDetails: SerializableConfirmationDetails = {
+          type: 'exec',
+          title: 'Confirm',
+          command: 'ls',
+          rootCommand: 'ls',
+          rootCommands: ['ls'],
+        };
+
+        const { lastFrame, unmount } = await renderWithProviders(
+          <ToolConfirmationMessage
+            callId="test-call-id"
+            confirmationDetails={confirmationDetails}
+            config={mockConfig}
+            getPreferredEditor={vi.fn()}
+            availableTerminalHeight={30}
+            terminalWidth={80}
+            toolName={toolName}
+          />,
+        );
+
+        expect(lastFrame()).toContain(expected);
+        unmount();
+      });
+    }
+
+    it('should humanize shell tool in sandbox expansion prompt', async () => {
+      const confirmationDetails: SerializableConfirmationDetails = {
+        type: 'sandbox_expansion',
+        title: 'Confirm',
+        command: 'ls',
+        rootCommand: 'ls',
+        additionalPermissions: {
+          network: true,
+        },
+      };
+
+      const { lastFrame, unmount } = await renderWithProviders(
+        <ToolConfirmationMessage
+          callId="test-call-id"
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          getPreferredEditor={vi.fn()}
+          availableTerminalHeight={30}
+          terminalWidth={80}
+          toolName="run_shell_command"
+        />,
+      );
+
+      expect(lastFrame()).toContain(
+        'To run [Shell], allow access to the following?',
+      );
+      unmount();
+    });
   });
 
   describe('with folder trust', () => {
@@ -335,6 +450,7 @@ describe('ToolConfirmationMessage', () => {
             getPreferredEditor={vi.fn()}
             availableTerminalHeight={30}
             terminalWidth={80}
+            toolName="shell"
           />,
         );
 
@@ -358,6 +474,7 @@ describe('ToolConfirmationMessage', () => {
             getPreferredEditor={vi.fn()}
             availableTerminalHeight={30}
             terminalWidth={80}
+            toolName="shell"
           />,
         );
 
@@ -393,6 +510,7 @@ describe('ToolConfirmationMessage', () => {
           getPreferredEditor={vi.fn()}
           availableTerminalHeight={30}
           terminalWidth={80}
+          toolName="shell"
         />,
         {
           settings: createMockSettings({
@@ -420,6 +538,7 @@ describe('ToolConfirmationMessage', () => {
           getPreferredEditor={vi.fn()}
           availableTerminalHeight={30}
           terminalWidth={80}
+          toolName="shell"
         />,
         {
           settings: createMockSettings({
@@ -458,7 +577,11 @@ describe('ToolConfirmationMessage', () => {
         confirm: vi.fn(),
         cancel: vi.fn(),
         isDiffingEnabled: false,
+        isExpanded: vi.fn().mockReturnValue(false),
+        toggleExpansion: vi.fn(),
+        toggleAllExpansion: vi.fn(),
       });
+
       const { lastFrame, unmount } = await renderWithProviders(
         <ToolConfirmationMessage
           callId="test-call-id"
@@ -467,6 +590,7 @@ describe('ToolConfirmationMessage', () => {
           getPreferredEditor={vi.fn()}
           availableTerminalHeight={30}
           terminalWidth={80}
+          toolName="shell"
         />,
       );
 
@@ -485,7 +609,11 @@ describe('ToolConfirmationMessage', () => {
         confirm: vi.fn(),
         cancel: vi.fn(),
         isDiffingEnabled: false,
+        isExpanded: vi.fn().mockReturnValue(false),
+        toggleExpansion: vi.fn(),
+        toggleAllExpansion: vi.fn(),
       });
+
       const { lastFrame, unmount } = await renderWithProviders(
         <ToolConfirmationMessage
           callId="test-call-id"
@@ -494,6 +622,7 @@ describe('ToolConfirmationMessage', () => {
           getPreferredEditor={vi.fn()}
           availableTerminalHeight={30}
           terminalWidth={80}
+          toolName="shell"
         />,
       );
 
@@ -512,6 +641,9 @@ describe('ToolConfirmationMessage', () => {
         confirm: vi.fn(),
         cancel: vi.fn(),
         isDiffingEnabled: true,
+        isExpanded: vi.fn().mockReturnValue(false),
+        toggleExpansion: vi.fn(),
+        toggleAllExpansion: vi.fn(),
       });
 
       const { lastFrame, unmount } = await renderWithProviders(
@@ -522,6 +654,7 @@ describe('ToolConfirmationMessage', () => {
           getPreferredEditor={vi.fn()}
           availableTerminalHeight={30}
           terminalWidth={80}
+          toolName="shell"
         />,
       );
 
@@ -548,6 +681,7 @@ describe('ToolConfirmationMessage', () => {
         getPreferredEditor={vi.fn()}
         availableTerminalHeight={30}
         terminalWidth={80}
+        toolName="shell"
       />,
     );
 
@@ -593,6 +727,7 @@ describe('ToolConfirmationMessage', () => {
         getPreferredEditor={vi.fn()}
         availableTerminalHeight={30}
         terminalWidth={80}
+        toolName="shell"
       />,
     );
 
@@ -624,6 +759,7 @@ describe('ToolConfirmationMessage', () => {
         getPreferredEditor={vi.fn()}
         availableTerminalHeight={30}
         terminalWidth={80}
+        toolName="shell"
       />,
     );
 
@@ -658,13 +794,14 @@ describe('ToolConfirmationMessage', () => {
             getPreferredEditor={vi.fn()}
             availableTerminalHeight={40}
             terminalWidth={80}
+            toolName="shell"
           />,
         );
       await waitUntilReady();
 
       const outputLines = lastFrame().split('\n');
-      // Should use the entire terminal height minus 1 line for the "Press Ctrl+O to show more lines" hint
-      expect(outputLines.length).toBe(39);
+      // Should use the entire terminal height
+      expect(outputLines.length).toBe(40);
 
       await expect({ lastFrame, generateSvg }).toMatchSvgSnapshot();
       unmount();
@@ -698,13 +835,14 @@ describe('ToolConfirmationMessage', () => {
             getPreferredEditor={vi.fn()}
             availableTerminalHeight={40}
             terminalWidth={80}
+            toolName="shell"
           />,
         );
       await waitUntilReady();
 
       const outputLines = lastFrame().split('\n');
-      // Should use the entire terminal height minus 1 line for the "Press Ctrl+O to show more lines" hint
-      expect(outputLines.length).toBe(39);
+      // Should use the entire terminal height
+      expect(outputLines.length).toBe(40);
 
       await expect({ lastFrame, generateSvg }).toMatchSvgSnapshot();
       unmount();
@@ -728,6 +866,9 @@ describe('ToolConfirmationMessage', () => {
         confirm: mockConfirm,
         cancel: vi.fn(),
         isDiffingEnabled: false,
+        isExpanded: vi.fn().mockReturnValue(false),
+        toggleExpansion: vi.fn(),
+        toggleAllExpansion: vi.fn(),
       });
       const confirmationDetails: SerializableConfirmationDetails = {
         type: 'info',
@@ -744,6 +885,7 @@ describe('ToolConfirmationMessage', () => {
           getPreferredEditor={vi.fn()}
           availableTerminalHeight={30}
           terminalWidth={80}
+          toolName="shell"
         />,
       );
 
@@ -764,6 +906,107 @@ describe('ToolConfirmationMessage', () => {
         undefined,
       );
 
+      unmount();
+    });
+  });
+
+  describe('Security Warnings & Build File Protection', () => {
+    it('should display critical security warning and suppress persistent approvals for build files', async () => {
+      const confirmationDetails: SerializableConfirmationDetails = {
+        type: 'edit',
+        title: 'Confirm Edit: BUILD',
+        fileName: 'BUILD',
+        filePath: '/workspace/BUILD',
+        fileDiff:
+          '--- BUILD\n+++ BUILD\n@@ -1,3 +1,3 @@\n-cc_library(name = "a")\n+cc_library(name = "b")',
+        originalContent: 'cc_library(name = "a")',
+        newContent: 'cc_library(name = "b")',
+        isBuildFile: true,
+      };
+
+      const { lastFrame, unmount } = await renderWithProviders(
+        <ToolConfirmationMessage
+          callId="test-build-edit"
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          getPreferredEditor={vi.fn()}
+          availableTerminalHeight={30}
+          terminalWidth={80}
+          toolName="replace"
+        />,
+      );
+
+      const frame = lastFrame();
+      expect(frame).toContain(
+        'CRITICAL SECURITY WARNING: Build File Modification',
+      );
+      expect(frame).toContain('Target: BUILD');
+      expect(frame).toContain('Allow once');
+      expect(frame).not.toContain('Allow for this session');
+      expect(frame).not.toContain('Allow for this file in all future sessions');
+      unmount();
+    });
+
+    it('should display critical security warning and suppress persistent approvals for untrusted command flags', async () => {
+      const confirmationDetails: SerializableConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Shell Command',
+        command: 'blaze test //target:all --test_arg=malicious_flag',
+        rootCommand: 'blaze',
+        rootCommands: ['blaze'],
+        untrustedFlags: ['--test_arg=malicious_flag'],
+      };
+
+      const { lastFrame, unmount } = await renderWithProviders(
+        <ToolConfirmationMessage
+          callId="test-untrusted-exec"
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          getPreferredEditor={vi.fn()}
+          availableTerminalHeight={30}
+          terminalWidth={80}
+          toolName="run_shell_command"
+        />,
+      );
+
+      const frame = lastFrame();
+      expect(frame).toContain(
+        'CRITICAL SECURITY WARNING: Untrusted Command Flags Detected',
+      );
+      expect(frame).toContain('--test_arg=malicious_flag');
+      expect(frame).toContain('Allow once');
+      expect(frame).not.toContain('Allow for this session');
+      expect(frame).not.toContain('Allow this command for all future sessions');
+      unmount();
+    });
+
+    it('should display caution warning when build files were modified earlier in session', async () => {
+      const confirmationDetails: SerializableConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Shell Command',
+        command: 'blaze test //target:all',
+        rootCommand: 'blaze',
+        rootCommands: ['blaze'],
+        modifiedBuildFiles: ['/workspace/pkg/BUILD'],
+      };
+
+      const { lastFrame, unmount } = await renderWithProviders(
+        <ToolConfirmationMessage
+          callId="test-build-mod-exec"
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          getPreferredEditor={vi.fn()}
+          availableTerminalHeight={30}
+          terminalWidth={80}
+          toolName="run_shell_command"
+        />,
+      );
+
+      const frame = lastFrame();
+      expect(frame).toContain(
+        'CAUTION: Build Configuration Was Recently Modified',
+      );
+      expect(frame).toContain('BUILD');
       unmount();
     });
   });

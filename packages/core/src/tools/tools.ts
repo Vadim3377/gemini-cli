@@ -22,6 +22,10 @@ import {
 } from '../confirmation-bus/types.js';
 import { ApprovalMode } from '../policy/types.js';
 import type { SubagentProgress } from '../agents/types.js';
+import {
+  isBuildFile,
+  extractFilePathFromArgs,
+} from '../utils/buildFileUtils.js';
 
 /**
 /**
@@ -34,6 +38,8 @@ export type ForcedToolDecision = 'allow' | 'deny' | 'ask_user';
  * only relevant to specific tool types.
  */
 export interface ExecuteOptions {
+  abortSignal: AbortSignal;
+  updateOutput?: (output: ToolLiveOutput) => void;
   shellExecutionConfig?: ShellExecutionConfig;
   setExecutionIdCallback?: (executionId: number) => void;
 }
@@ -90,16 +96,10 @@ export interface ToolInvocation<
 
   /**
    * Executes the tool with the validated parameters.
-   * @param signal AbortSignal for tool cancellation.
-   * @param updateOutput Optional callback to stream output.
-   * @param setExecutionIdCallback Optional callback for tools that expose a background execution handle.
+   * @param options Options for tool execution including signal and output updates.
    * @returns Result of the tool execution.
    */
-  execute(
-    signal: AbortSignal,
-    updateOutput?: (output: ToolLiveOutput) => void,
-    options?: ExecuteOptions,
-  ): Promise<TResult>;
+  execute(options: ExecuteOptions): Promise<TResult>;
 
   /**
    * Returns tool-specific options for policy updates.
@@ -192,7 +192,11 @@ export abstract class BaseToolInvocation<
     abortSignal: AbortSignal,
     forcedDecision?: ForcedToolDecision,
   ): Promise<ToolCallConfirmationDetails | false> {
+    const filePath = extractFilePathFromArgs(this.params);
+    const isTargetingBuildFile = Boolean(filePath && isBuildFile(filePath));
+
     if (
+      !isTargetingBuildFile &&
       this.respectsAutoEdit &&
       this.getApprovalMode() === ApprovalMode.AUTO_EDIT &&
       forcedDecision !== 'ask_user'
@@ -367,18 +371,14 @@ export abstract class BaseToolInvocation<
 
       try {
         void this.messageBus.publish(request);
-      } catch (_error) {
+      } catch {
         cleanup();
         resolve('allow');
       }
     });
   }
 
-  abstract execute(
-    signal: AbortSignal,
-    updateOutput?: (output: ToolLiveOutput) => void,
-    options?: ExecuteOptions,
-  ): Promise<TResult>;
+  abstract execute(options: ExecuteOptions): Promise<TResult>;
 
   toJSON() {
     return {
@@ -609,10 +609,14 @@ export abstract class DeclarativeTool<
     params: TParams,
     signal: AbortSignal,
     updateOutput?: (output: ToolLiveOutput) => void,
-    options?: ExecuteOptions,
+    options?: Omit<ExecuteOptions, 'abortSignal' | 'updateOutput'>,
   ): Promise<TResult> {
     const invocation = this.build(params);
-    return invocation.execute(signal, updateOutput, options);
+    return invocation.execute({
+      ...options,
+      abortSignal: signal,
+      updateOutput,
+    });
   }
 
   /**
@@ -658,7 +662,7 @@ export abstract class DeclarativeTool<
     }
 
     try {
-      return await invocationOrError.execute(abortSignal);
+      return await invocationOrError.execute({ abortSignal });
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
@@ -744,6 +748,10 @@ export function isTool(obj: unknown): obj is AnyDeclarativeTool {
 }
 
 export interface ToolResult {
+  /**
+   * Tool-controlled display information.
+   */
+  display?: ToolDisplay;
   /**
    * Content meant to be included in LLM history.
    * This should represent the factual outcome of the tool execution.
@@ -921,12 +929,18 @@ export const isListResult = (
 ): res is ListDirectoryResult | ReadManyFilesResult =>
   isStructuredToolResult(res) && 'files' in res && Array.isArray(res.files);
 
+export const isReadManyFilesResult = (
+  res: unknown,
+): res is ReadManyFilesResult => isListResult(res) && 'include' in res;
 export type ToolResultDisplay =
   | string
   | FileDiff
   | AnsiOutput
   | TodoList
-  | SubagentProgress;
+  | SubagentProgress
+  | GrepResult
+  | ListDirectoryResult
+  | ReadManyFilesResult;
 
 export type TodoStatus =
   | 'pending'
@@ -948,6 +962,7 @@ export interface FileDiff {
   newContent: string;
   diffStat?: DiffStat;
   isNewFile?: boolean;
+  isBuildFile?: boolean;
 }
 
 export const isFileDiff = (res: unknown): res is FileDiff =>
@@ -984,6 +999,7 @@ export interface ToolEditConfirmationDetails {
   isModifying?: boolean;
   diffStat?: DiffStat;
   ideConfirmation?: Promise<DiffUpdateResult>;
+  isBuildFile?: boolean;
 }
 
 export interface ToolEditConfirmationPayload {
@@ -1027,6 +1043,8 @@ export interface ToolExecuteConfirmationDetails {
   rootCommand: string;
   rootCommands: string[];
   commands?: string[];
+  untrustedFlags?: string[];
+  modifiedBuildFiles?: string[];
 }
 
 export interface ToolMcpConfirmationDetails {
@@ -1081,6 +1099,9 @@ export type ToolCallConfirmationDetails =
   | ToolInfoConfirmationDetails
   | ToolAskUserConfirmationDetails
   | ToolExitPlanModeConfirmationDetails;
+
+import type { ToolDisplay } from '../agent/types.js';
+export type { ToolDisplay };
 
 export enum ToolConfirmationOutcome {
   ProceedOnce = 'proceed_once',

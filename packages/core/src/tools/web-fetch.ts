@@ -13,13 +13,14 @@ import {
   type ToolInvocation,
   type ToolResult,
   type PolicyUpdateOptions,
+  type ExecuteOptions,
 } from './tools.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { ToolErrorType } from './tool-error.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { fetchWithTimeout, isPrivateIp } from '../utils/fetch.js';
-import { truncateString } from '../utils/textUtils.js';
+import { truncateString, wrapUntrusted } from '../utils/textUtils.js';
 import { convert } from 'html-to-text';
 import {
   logWebFetchFallbackAttempt,
@@ -73,7 +74,7 @@ function checkRateLimit(url: string): {
     history.push(now);
     hostRequestHistory.set(hostname, history);
     return { allowed: true };
-  } catch (_e) {
+  } catch {
     // If URL parsing fails, we fallback to allowed (should be caught by parsePrompt anyway)
     return { allowed: true };
   }
@@ -132,7 +133,7 @@ export function parsePrompt(text: string): {
             `Unsupported protocol in URL: "${token}". Only http and https are supported.`,
           );
         }
-      } catch (_) {
+      } catch {
         // new URL() threw, so it's malformed according to WHATWG standard
         errors.push(`Malformed URL detected: "${token}".`);
       }
@@ -266,14 +267,20 @@ class WebFetchToolInvocation extends BaseToolInvocation<
     );
   }
 
-  private isBlockedHost(urlStr: string): boolean {
+  private async isBlockedHost(urlStr: string): Promise<boolean> {
     try {
       const url = new URL(urlStr);
       const hostname = url.hostname.toLowerCase();
-      if (hostname === 'localhost' || hostname === '127.0.0.1') {
+      if (
+        hostname === 'localhost' ||
+        hostname === '127.0.0.1' ||
+        hostname.endsWith('.localhost') ||
+        hostname.endsWith('.local') ||
+        hostname.endsWith('.internal')
+      ) {
         return true;
       }
-      return isPrivateIp(urlStr);
+      return await isPrivateIp(urlStr);
     } catch {
       return true;
     }
@@ -284,7 +291,7 @@ class WebFetchToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
   ): Promise<string> {
     const url = convertGithubUrlToRaw(urlStr);
-    if (this.isBlockedHost(url)) {
+    if (await this.isBlockedHost(url)) {
       debugLogger.warn(`[WebFetchTool] Blocked access to host: ${url}`);
       throw new Error(
         `Access to blocked or private host ${url} is not allowed.`,
@@ -338,21 +345,27 @@ class WebFetchToolInvocation extends BaseToolInvocation<
       textContent = rawContent;
     }
 
-    // Cap at MAX_CONTENT_LENGTH initially to avoid excessive memory usage
-    // before the global budget allocation.
-    return truncateString(textContent, MAX_CONTENT_LENGTH, '');
+    if (!this.context.config.isContextManagementEnabled()) {
+      return truncateString(
+        textContent,
+        MAX_CONTENT_LENGTH,
+        TRUNCATION_WARNING,
+      );
+    }
+
+    return textContent;
   }
 
-  private filterAndValidateUrls(urls: string[]): {
+  private async filterAndValidateUrls(urls: string[]): Promise<{
     toFetch: string[];
     skipped: string[];
-  } {
+  }> {
     const uniqueUrls = [...new Set(urls.map(normalizeUrl))];
     const toFetch: string[] = [];
     const skipped: string[] = [];
 
     for (const url of uniqueUrls) {
-      if (this.isBlockedHost(url)) {
+      if (await this.isBlockedHost(url)) {
         debugLogger.warn(
           `[WebFetchTool] Skipped private or local host: ${url}`,
         );
@@ -406,28 +419,32 @@ class WebFetchToolInvocation extends BaseToolInvocation<
       };
     }
 
-    // Smart Budget Allocation (Water-filling algorithm) for successes
-    const sortedSuccesses = [...successes].sort(
-      (a, b) => a.content.length - b.content.length,
-    );
-
-    let remainingBudget = MAX_CONTENT_LENGTH;
-    let remainingUrls = sortedSuccesses.length;
     const finalContentsByUrl = new Map<string, string>();
-
-    for (const success of sortedSuccesses) {
-      const fairShare = Math.floor(remainingBudget / remainingUrls);
-      const allocated = Math.min(success.content.length, fairShare);
-
-      const truncated = truncateString(
-        success.content,
-        allocated,
-        TRUNCATION_WARNING,
+    if (this.context.config.isContextManagementEnabled()) {
+      successes.forEach((success) =>
+        finalContentsByUrl.set(success.url, success.content),
       );
+    } else {
+      // Smart Budget Allocation (Water-filling algorithm) for successes
+      const sortedSuccesses = [...successes].sort(
+        (a, b) => a.content.length - b.content.length,
+      );
+      let remainingBudget = MAX_CONTENT_LENGTH;
+      let remainingUrls = sortedSuccesses.length;
+      for (const success of sortedSuccesses) {
+        const fairShare = Math.floor(remainingBudget / remainingUrls);
+        const allocated = Math.min(success.content.length, fairShare);
 
-      finalContentsByUrl.set(success.url, truncated);
-      remainingBudget -= truncated.length;
-      remainingUrls--;
+        const truncated = truncateString(
+          success.content,
+          allocated,
+          TRUNCATION_WARNING,
+        );
+
+        finalContentsByUrl.set(success.url, truncated);
+        remainingBudget -= truncated.length;
+        remainingUrls--;
+      }
     }
 
     const aggregatedContent = uniqueUrls
@@ -478,7 +495,7 @@ ${aggregatedContent}
       );
 
       return {
-        llmContent: resultText,
+        llmContent: wrapUntrusted(resultText),
         returnDisplay: `Content for ${urls.length} URL(s) processed using fallback fetch.`,
       };
     } catch (e) {
@@ -604,7 +621,7 @@ ${aggregatedContent}
     // Convert GitHub blob URL to raw URL
     url = convertGithubUrlToRaw(url);
 
-    if (this.isBlockedHost(url)) {
+    if (await this.isBlockedHost(url)) {
       const errorMessage = `Access to blocked or private host ${url} is not allowed.`;
       debugLogger.warn(
         `[WebFetchTool] Blocked experimental fetch to host: ${url}`,
@@ -648,14 +665,21 @@ ${aggregatedContent}
       );
 
       if (status >= 400) {
-        const rawResponseText = bodyBuffer.toString('utf8');
+        let rawResponseText = bodyBuffer.toString('utf8');
+        if (!this.context.config.isContextManagementEnabled()) {
+          rawResponseText = truncateString(
+            rawResponseText,
+            10000,
+            '\n\n... [Error response truncated] ...',
+          );
+        }
         const headers: Record<string, string> = {};
         response.headers.forEach((value, key) => {
           headers[key] = value;
         });
         const errorContent = `Request failed with status ${status}
 Headers: ${JSON.stringify(headers, null, 2)}
-Response: ${truncateString(rawResponseText, 10000, '\n\n... [Error response truncated] ...')}`;
+Response: ${rawResponseText}`;
         debugLogger.error(
           `[WebFetchTool] Experimental fetch failed with status ${status} for ${url}`,
         );
@@ -671,31 +695,33 @@ Response: ${truncateString(rawResponseText, 10000, '\n\n... [Error response trun
         lowContentType.includes('text/plain') ||
         lowContentType.includes('application/json')
       ) {
-        const text = truncateString(
-          bodyBuffer.toString('utf8'),
-          MAX_CONTENT_LENGTH,
-          TRUNCATION_WARNING,
-        );
+        let text = bodyBuffer.toString('utf8');
+        if (!this.context.config.isContextManagementEnabled()) {
+          text = truncateString(text, MAX_CONTENT_LENGTH, TRUNCATION_WARNING);
+        }
         return {
-          llmContent: text,
+          llmContent: wrapUntrusted(text),
           returnDisplay: `Fetched ${contentType} content from ${url}`,
         };
       }
 
       if (lowContentType.includes('text/html')) {
         const html = bodyBuffer.toString('utf8');
-        const textContent = truncateString(
-          convert(html, {
-            wordwrap: false,
-            selectors: [
-              { selector: 'a', options: { ignoreHref: false, baseUrl: url } },
-            ],
-          }),
-          MAX_CONTENT_LENGTH,
-          TRUNCATION_WARNING,
-        );
+        let textContent = convert(html, {
+          wordwrap: false,
+          selectors: [
+            { selector: 'a', options: { ignoreHref: false, baseUrl: url } },
+          ],
+        });
+        if (!this.context.config.isContextManagementEnabled()) {
+          textContent = truncateString(
+            textContent,
+            MAX_CONTENT_LENGTH,
+            TRUNCATION_WARNING,
+          );
+        }
         return {
-          llmContent: textContent,
+          llmContent: wrapUntrusted(textContent),
           returnDisplay: `Fetched and converted HTML content from ${url}`,
         };
       }
@@ -718,13 +744,12 @@ Response: ${truncateString(rawResponseText, 10000, '\n\n... [Error response trun
       }
 
       // Fallback for unknown types - try as text
-      const text = truncateString(
-        bodyBuffer.toString('utf8'),
-        MAX_CONTENT_LENGTH,
-        TRUNCATION_WARNING,
-      );
+      let text = bodyBuffer.toString('utf8');
+      if (!this.context.config.isContextManagementEnabled()) {
+        text = truncateString(text, MAX_CONTENT_LENGTH, TRUNCATION_WARNING);
+      }
       return {
-        llmContent: text,
+        llmContent: wrapUntrusted(text),
         returnDisplay: `Fetched ${contentType || 'unknown'} content from ${url}`,
       };
     } catch (e) {
@@ -743,14 +768,14 @@ Response: ${truncateString(rawResponseText, 10000, '\n\n... [Error response trun
     }
   }
 
-  async execute(signal: AbortSignal): Promise<ToolResult> {
+  async execute({ abortSignal: signal }: ExecuteOptions): Promise<ToolResult> {
     if (this.context.config.getDirectWebFetch()) {
       return this.executeExperimental(signal);
     }
     const userPrompt = this.params.prompt!;
     const { validUrls } = parsePrompt(userPrompt);
 
-    const { toFetch, skipped } = this.filterAndValidateUrls(validUrls);
+    const { toFetch, skipped } = await this.filterAndValidateUrls(validUrls);
 
     // If everything was skipped, fail early
     if (toFetch.length === 0 && skipped.length > 0) {
@@ -851,7 +876,7 @@ ${toFetch.join('\n')}
       );
 
       return {
-        llmContent: responseText,
+        llmContent: wrapUntrusted(responseText),
         returnDisplay: `Content processed from prompt.`,
       };
     } catch (error: unknown) {

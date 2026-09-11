@@ -48,14 +48,18 @@ index 0000000..e69de29
           },
         );
         await waitFor(() =>
-          expect(mockColorizeCode).toHaveBeenCalledWith({
-            code: 'print("hello world")',
-            language: 'python',
-            availableHeight: undefined,
-            maxWidth: 80,
-            theme: undefined,
-            settings: expect.anything(),
-          }),
+          expect(mockColorizeCode).toHaveBeenCalledWith(
+            expect.objectContaining({
+              code: 'print("hello world")',
+              language: 'python',
+              availableHeight: undefined,
+              maxWidth: 80,
+              theme: undefined,
+              settings: expect.anything(),
+              disableColor: false,
+              paddingX: 0,
+            }),
+          ),
         );
       });
 
@@ -82,14 +86,18 @@ index 0000000..e69de29
           },
         );
         await waitFor(() =>
-          expect(mockColorizeCode).toHaveBeenCalledWith({
-            code: 'some content',
-            language: null,
-            availableHeight: undefined,
-            maxWidth: 80,
-            theme: undefined,
-            settings: expect.anything(),
-          }),
+          expect(mockColorizeCode).toHaveBeenCalledWith(
+            expect.objectContaining({
+              code: 'some content',
+              language: null,
+              availableHeight: undefined,
+              maxWidth: 80,
+              theme: undefined,
+              settings: expect.anything(),
+              disableColor: false,
+              paddingX: 0,
+            }),
+          ),
         );
       });
 
@@ -112,14 +120,18 @@ index 0000000..e69de29
           },
         );
         await waitFor(() =>
-          expect(mockColorizeCode).toHaveBeenCalledWith({
-            code: 'some text content',
-            language: null,
-            availableHeight: undefined,
-            maxWidth: 80,
-            theme: undefined,
-            settings: expect.anything(),
-          }),
+          expect(mockColorizeCode).toHaveBeenCalledWith(
+            expect.objectContaining({
+              code: 'some text content',
+              language: null,
+              availableHeight: undefined,
+              maxWidth: 80,
+              theme: undefined,
+              settings: expect.anything(),
+              disableColor: false,
+              paddingX: 0,
+            }),
+          ),
         );
       });
 
@@ -380,6 +392,41 @@ fileDiff Index: Dockerfile
         );
         await waitFor(() => expect(lastFrame()).toContain('RUN npm run build'));
         expect(lastFrame()).toMatchSnapshot();
+      });
+
+      it('should disable truncation and render all diff lines without hidden lines indicator when disableTruncation is true', async () => {
+        const longDiff = `
+diff --git a/test.txt b/test.txt
+--- a/test.txt
++++ b/test.txt
+@@ -1,10 +1,10 @@
+-old line 1
+-old line 2
+-old line 3
+-old line 4
+-old line 5
++new line 1
++new line 2
++new line 3
++new line 4
++new line 5
+`;
+        const { lastFrame } = await renderWithProviders(
+          <OverflowProvider>
+            <DiffRenderer
+              diffContent={longDiff}
+              filename="test.txt"
+              availableTerminalHeight={3}
+              disableTruncation={true}
+              terminalWidth={80}
+            />
+          </OverflowProvider>,
+        );
+        await waitFor(() => {
+          expect(lastFrame()).toContain('new line 1');
+          expect(lastFrame()).toContain('new line 5');
+          expect(lastFrame()).not.toContain('hidden');
+        });
       });
     },
   );

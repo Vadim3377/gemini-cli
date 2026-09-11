@@ -10,20 +10,30 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { TestRig } from '@google/gemini-cli-test-utils';
+import { formatToolLogChain } from '../scripts/utils/tool-log-formatter.js';
 import {
   createUnauthorizedToolError,
   parseAgentMarkdown,
   Storage,
   getProjectHash,
   SESSION_FILE_PREFIX,
+  PREVIEW_GEMINI_FLASH_MODEL,
+  getErrorMessage,
 } from '@google/gemini-cli-core';
 
 export * from '@google/gemini-cli-test-utils';
 
+/**
+ * The default model used for all evaluations.
+ * Can be overridden by setting the GEMINI_MODEL environment variable.
+ */
+export const EVAL_MODEL =
+  process.env['GEMINI_MODEL'] || PREVIEW_GEMINI_FLASH_MODEL;
+
 // Indicates the consistency expectation for this test.
 // - ALWAYS_PASSES - Means that the test is expected to pass 100% of the time. These
 //   These tests are typically trivial and test basic functionality with unambiguous
-//   prompts. For example: "call save_memory to remember foo" should be fairly reliable.
+//   prompts. For example: "remember foo" should be fairly reliable.
 //   These are the first line of defense against regressions in key behaviors and run in
 //   every CI. You can run these locally with 'npm run test:always_passing_evals'.
 //
@@ -36,22 +46,52 @@ export * from '@google/gemini-cli-test-utils';
 //   The pass/fail trendline of this set of tests can be used as a general measure
 //   of product quality. You can run these locally with 'npm run test:all_evals'.
 //   This may take a really long time and is not recommended.
-export type EvalPolicy = 'ALWAYS_PASSES' | 'USUALLY_PASSES';
+export type EvalPolicy = 'ALWAYS_PASSES' | 'USUALLY_PASSES' | 'USUALLY_FAILS';
 
 export function evalTest(policy: EvalPolicy, evalCase: EvalCase) {
-  runEval(
-    policy,
-    evalCase.name,
-    () => internalEvalTest(evalCase),
-    evalCase.timeout,
-  );
+  runEval(policy, evalCase, () => internalEvalTest(evalCase));
 }
 
-export async function internalEvalTest(evalCase: EvalCase) {
+export async function withEvalRetries(
+  name: string,
+  attemptFn: (attempt: number) => Promise<void>,
+) {
   const maxRetries = 3;
   let attempt = 0;
 
   while (attempt <= maxRetries) {
+    try {
+      await attemptFn(attempt);
+      return; // Success! Exit the retry loop.
+    } catch (error: unknown) {
+      const errorMessage = getErrorMessage(error);
+      const errorCode = getApiErrorCode(errorMessage);
+
+      if (errorCode) {
+        const status = attempt < maxRetries ? 'RETRY' : 'SKIP';
+        logReliabilityEvent(name, attempt, status, errorCode, errorMessage);
+
+        if (attempt < maxRetries) {
+          attempt++;
+          console.warn(
+            `[Eval] Attempt ${attempt} failed with ${errorCode} Error. Retrying...`,
+          );
+          continue; // Retry
+        }
+
+        console.warn(
+          `[Eval] '${name}' failed after ${maxRetries} retries due to persistent API errors. Skipping failure to avoid blocking PR.`,
+        );
+        return; // Gracefully exit without failing the test
+      }
+
+      throw error; // Real failure
+    }
+  }
+}
+
+export async function internalEvalTest(evalCase: EvalCase) {
+  await withEvalRetries(evalCase.name, async () => {
     const rig = new TestRig();
     const { logDir, sanitizedName } = await prepareLogDir(evalCase.name);
     const activityLogFile = path.join(logDir, `${sanitizedName}.jsonl`);
@@ -59,10 +99,21 @@ export async function internalEvalTest(evalCase: EvalCase) {
     let isSuccess = false;
 
     try {
-      rig.setup(evalCase.name, evalCase.params);
+      const setupOptions = {
+        ...evalCase.params,
+        settings: {
+          model: { name: EVAL_MODEL },
+          ...evalCase.params?.settings,
+        },
+      };
+      rig.setup(evalCase.name, setupOptions);
+
+      if (evalCase.setup) {
+        await evalCase.setup(rig);
+      }
 
       if (evalCase.files) {
-        await setupTestFiles(rig, evalCase.files);
+        await prepareWorkspace(rig.testDir!, rig.homeDir!, evalCase.files);
       }
 
       symlinkNodeModules(rig.testDir || '');
@@ -122,6 +173,7 @@ export async function internalEvalTest(evalCase: EvalCase) {
         timeout: evalCase.timeout,
         env: {
           GEMINI_CLI_ACTIVITY_LOG_TARGET: activityLogFile,
+          GEMINI_CLI_TRUST_WORKSPACE: 'true',
         },
       });
 
@@ -135,37 +187,23 @@ export async function internalEvalTest(evalCase: EvalCase) {
 
       await evalCase.assert(rig, result);
       isSuccess = true;
-      return; // Success! Exit the retry loop.
     } catch (error: unknown) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      const errorCode = getApiErrorCode(errorMessage);
-
-      if (errorCode) {
-        const status = attempt < maxRetries ? 'RETRY' : 'SKIP';
-        logReliabilityEvent(
-          evalCase.name,
-          attempt,
-          status,
-          errorCode,
-          errorMessage,
-        );
-
-        if (attempt < maxRetries) {
-          attempt++;
-          console.warn(
-            `[Eval] Attempt ${attempt} failed with ${errorCode} Error. Retrying...`,
-          );
-          continue; // Retry
+      const toolLogs = rig.readToolLogs();
+      if (toolLogs && toolLogs.length > 0) {
+        const summary = formatToolLogChain(toolLogs);
+        if (error instanceof Error) {
+          try {
+            error.message = `${error.message}\n\nTool Call Chain (${toolLogs.length} calls):\n${summary}`;
+          } catch {
+            // Error object may be frozen or have a read-only message property.
+            // The original error is still re-thrown, so no failure is hidden.
+            console.warn(
+              `[eval] Could not append tool call chain to error message (${toolLogs.length} calls)`,
+            );
+          }
         }
-
-        console.warn(
-          `[Eval] '${evalCase.name}' failed after ${maxRetries} retries due to persistent API errors. Skipping failure to avoid blocking PR.`,
-        );
-        return; // Gracefully exit without failing the test
       }
-
-      throw error; // Real failure
+      throw error;
     } finally {
       if (isSuccess) {
         await fs.promises.unlink(activityLogFile).catch((err) => {
@@ -184,7 +222,7 @@ export async function internalEvalTest(evalCase: EvalCase) {
       );
       await rig.cleanup();
     }
-  }
+  });
 }
 
 function getApiErrorCode(message: string): '500' | '503' | undefined {
@@ -222,7 +260,7 @@ function logReliabilityEvent(
   const reliabilityLog = {
     timestamp: new Date().toISOString(),
     testName,
-    model: process.env.GEMINI_MODEL || 'unknown',
+    model: process.env['GEMINI_MODEL'] || 'unknown',
     attempt,
     status,
     errorCode,
@@ -248,9 +286,13 @@ function logReliabilityEvent(
  * intentionally uses synchronous filesystem and child_process operations
  * for simplicity and to ensure sequential environment preparation.
  */
-async function setupTestFiles(rig: TestRig, files: Record<string, string>) {
+export async function prepareWorkspace(
+  testDir: string,
+  homeDir: string,
+  files: Record<string, string>,
+) {
   const acknowledgedAgents: Record<string, Record<string, string>> = {};
-  const projectRoot = fs.realpathSync(rig.testDir!);
+  const projectRoot = fs.realpathSync(testDir);
 
   for (const [filePath, content] of Object.entries(files)) {
     if (filePath.includes('..') || path.isAbsolute(filePath)) {
@@ -286,7 +328,7 @@ async function setupTestFiles(rig: TestRig, files: Record<string, string>) {
 
   if (Object.keys(acknowledgedAgents).length > 0) {
     const ackPath = path.join(
-      rig.homeDir!,
+      homeDir,
       '.gemini',
       'acknowledgments',
       'agents.json',
@@ -295,7 +337,7 @@ async function setupTestFiles(rig: TestRig, files: Record<string, string>) {
     fs.writeFileSync(ackPath, JSON.stringify(acknowledgedAgents, null, 2));
   }
 
-  const execOptions = { cwd: rig.testDir!, stdio: 'inherit' as const };
+  const execOptions = { cwd: testDir, stdio: 'ignore' as const };
   execSync('git init --initial-branch=main', execOptions);
   execSync('git config user.email "test@example.com"', execOptions);
   execSync('git config user.name "Test User"', execOptions);
@@ -316,14 +358,34 @@ async function setupTestFiles(rig: TestRig, files: Record<string, string>) {
  */
 export function runEval(
   policy: EvalPolicy,
-  name: string,
+  evalCase: BaseEvalCase,
   fn: () => Promise<void>,
-  timeout?: number,
+  timeoutOverride?: number,
 ) {
-  if (policy === 'USUALLY_PASSES' && !process.env['RUN_EVALS']) {
-    it.skip(name, fn);
+  const { name, timeout, suiteName, suiteType } = evalCase;
+  const targetSuiteType = process.env['EVAL_SUITE_TYPE'];
+  const targetSuiteName = process.env['EVAL_SUITE_NAME'];
+
+  const meta = { suiteType, suiteName };
+
+  const skipBySuiteType =
+    targetSuiteType && suiteType && suiteType !== targetSuiteType;
+  const skipBySuiteName =
+    targetSuiteName && suiteName && suiteName !== targetSuiteName;
+
+  const options = { timeout: timeoutOverride ?? timeout, meta };
+
+  if (skipBySuiteType || skipBySuiteName) {
+    it.skip(name, options, fn);
+  } else if (
+    !process.env['RUN_EVALS'] &&
+    (policy === 'USUALLY_PASSES' || policy === 'USUALLY_FAILS')
+  ) {
+    it.skip(name, options, fn);
+  } else if (policy === 'USUALLY_FAILS') {
+    it.fails(name, options, fn);
   } else {
-    it(name, fn, timeout);
+    it(name, options, fn);
   }
 }
 
@@ -362,15 +424,21 @@ interface ForbiddenToolSettings {
   };
 }
 
-export interface EvalCase {
+export interface BaseEvalCase {
+  suiteName: string;
+  suiteType: 'behavioral' | 'component-level' | 'hero-scenario';
   name: string;
+  timeout?: number;
+  files?: Record<string, string>;
+}
+
+export interface EvalCase extends BaseEvalCase {
   params?: {
     settings?: ForbiddenToolSettings & Record<string, unknown>;
     [key: string]: unknown;
   };
   prompt: string;
-  timeout?: number;
-  files?: Record<string, string>;
+  setup?: (rig: TestRig) => Promise<void> | void;
   /** Conversation history to pre-load via --resume. Each entry is a message object with type, content, etc. */
   messages?: Record<string, unknown>[];
   /** Session ID for the resumed session. Auto-generated if not provided. */

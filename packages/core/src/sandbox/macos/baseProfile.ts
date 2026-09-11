@@ -23,6 +23,15 @@ export const BASE_SEATBELT_PROFILE = `(version 1)
 (allow signal (target same-sandbox))
 (allow process-info*)
 
+; Map system frameworks + dylibs for loader.
+(allow file-map-executable
+  (subpath "/System/Library/Frameworks")
+  (subpath "/System/Library/PrivateFrameworks")
+  (subpath "/usr/lib")
+  (subpath "/bin")
+  (subpath "/usr/bin")
+)
+
 (allow file-write-data
   (require-all
     (path "/dev/null")
@@ -86,14 +95,20 @@ export const BASE_SEATBELT_PROFILE = `(version 1)
 
 (allow mach-lookup
   (global-name "com.apple.sysmond")
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.system.opendirectoryd.membership")
+  (global-name "com.apple.system.logger")
+  (global-name "com.apple.system.notification_center")
+  (global-name "com.apple.logd")
+  (global-name "com.apple.secinitd")
+  (global-name "com.apple.trustd.agent")
+  (global-name "com.apple.trustd")
+  (global-name "com.apple.analyticsd")
+  (global-name "com.apple.analyticsd.messagetracer")
 )
 \n; IOKit
 (allow iokit-open
   (iokit-registry-entry-class "RootDomainUserClient")
-)
-
-(allow mach-lookup
-  (global-name "com.apple.system.opendirectoryd.libinfo")
 )
 
 ; Needed for python multiprocessing on MacOS for the SemLock
@@ -132,16 +147,67 @@ export const BASE_SEATBELT_PROFILE = `(version 1)
 (allow file-read* file-write*
   (literal "/dev/null")
   (literal "/dev/zero")
+  (literal "/dev/tty")
+  (subpath "/dev/fd")
   (subpath "/tmp")
   (subpath "/private/tmp")
-  (subpath (param "TMPDIR"))
 )
 
-; Workspace access using parameterized paths
-(allow file-read*
-  (subpath (param "WORKSPACE"))
+(allow file-read-metadata
+  (literal "/")
+  (subpath "/var")
+  (subpath "/private/var")
+  (subpath "/dev")
 )
 
+; Block Docker & container daemon UNIX domain sockets (read & write)
+(deny file-read* file-write*
+  (literal "/var/run/docker.sock")
+  (literal "/var/run/docker.sock.raw")
+  (literal "/private/var/run/docker.sock")
+  (literal "/private/var/run/docker.sock.raw")
+  (subpath "/var/run/docker")
+  (subpath "/private/var/run/docker")
+  (subpath "/Users/Shared/.docker")
+  (regex #"^/Users/[^/]+/\\.docker/run/")
+  (regex #"^/Users/[^/]+/\\.docker/desktop/")
+  (regex #"^/Users/[^/]+/\\.colima/")
+  (regex #"^/Users/[^/]+/\\.orbstack/run/")
+  (regex #"^/Users/[^/]+/\\.rd/")
+)
+
+; Block container CLI and daemon binaries from execution
+(deny process-exec
+  (literal "/usr/local/bin/docker")
+  (literal "/usr/local/bin/dockerd")
+  (literal "/usr/local/bin/docker-compose")
+  (literal "/usr/bin/docker")
+  (literal "/opt/homebrew/bin/docker")
+  (literal "/opt/homebrew/bin/dockerd")
+  (literal "/opt/homebrew/bin/docker-compose")
+  (literal "/opt/homebrew/bin/podman")
+  (literal "/usr/local/bin/podman")
+  (literal "/opt/homebrew/bin/colima")
+  (literal "/usr/local/bin/colima")
+  (literal "/opt/homebrew/bin/orb")
+  (literal "/Applications/Docker.app/Contents/Resources/bin/docker")
+  (subpath "/Applications/Docker.app/Contents/MacOS/")
+  (subpath "/Applications/OrbStack.app/Contents/MacOS/")
+  (subpath "/Applications/Rancher Desktop.app/Contents/MacOS/")
+)
+
+; Block com.docker.* and container manager Mach lookup / XPC services
+(deny mach-lookup
+  (xpc-service-name-prefix "com.docker.")
+  (global-name-prefix "com.docker.")
+  (global-name-prefix "dev.kdrag0n.OrbStack")
+)
+
+; Block Docker POSIX Shared Memory
+(deny ipc-posix-shm*
+  (ipc-posix-name-prefix "docker")
+  (ipc-posix-name-prefix "com.docker.")
+)
 `;
 
 /**

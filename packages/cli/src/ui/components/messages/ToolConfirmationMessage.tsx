@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import type React from 'react';
 import { useEffect, useMemo, useCallback, useState, useRef } from 'react';
 import { Box, Text, ResizeObserver, type DOMElement } from 'ink';
@@ -24,13 +25,14 @@ import {
   RadioButtonSelect,
   type RadioSelectItem,
 } from '../shared/RadioButtonSelect.js';
-import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
+import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import {
   sanitizeForDisplay,
   stripUnsafeCharacters,
 } from '../../utils/textUtils.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
+import { themeManager } from '../../themes/theme-manager.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import { Command } from '../../key/keyMatchers.js';
 import { formatCommand } from '../../key/keybindingUtils.js';
@@ -44,6 +46,8 @@ import {
   type DeceptiveUrlDetails,
 } from '../../utils/urlSecurityUtils.js';
 import { useKeyMatchers } from '../../hooks/useKeyMatchers.js';
+import { isShellTool } from './ToolShared.js';
+import { isLockFile } from '../../utils/fileUtils.js';
 
 export interface ToolConfirmationMessageProps {
   callId: string;
@@ -53,12 +57,8 @@ export interface ToolConfirmationMessageProps {
   isFocused?: boolean;
   availableTerminalHeight?: number;
   terminalWidth: number;
+  toolName: string;
 }
-
-const REDIRECTION_WARNING_NOTE_LABEL = 'Note: ';
-const REDIRECTION_WARNING_NOTE_TEXT =
-  'Command contains redirection which can be undesirable.';
-const REDIRECTION_WARNING_TIP_LABEL = 'Tip:  '; // Padded to align with "Note: "
 
 export const ToolConfirmationMessage: React.FC<
   ToolConfirmationMessageProps
@@ -70,6 +70,7 @@ export const ToolConfirmationMessage: React.FC<
   isFocused = true,
   availableTerminalHeight,
   terminalWidth,
+  toolName,
 }) => {
   const keyMatchers = useKeyMatchers();
   const { confirm, isDiffingEnabled } = useToolActions();
@@ -89,6 +90,13 @@ export const ToolConfirmationMessage: React.FC<
   const [measuredSecurityWarningsHeight, setMeasuredSecurityWarningsHeight] =
     useState(0);
   const observerRef = useRef<ResizeObserver | null>(null);
+
+  useEffect(
+    () => () => {
+      observerRef.current?.disconnect();
+    },
+    [],
+  );
 
   const deceptiveUrlWarnings = useMemo(() => {
     const urls: string[] = [];
@@ -145,6 +153,7 @@ export const ToolConfirmationMessage: React.FC<
   }, []);
 
   const settings = useSettings();
+  const activeTheme = themeManager.getActiveTheme();
   const allowPermanentApproval =
     settings.merged.security.enablePermanentToolApproval &&
     !config.getDisableAlwaysAllow();
@@ -247,8 +256,6 @@ export const ToolConfirmationMessage: React.FC<
         return true;
       }
       if (keyMatchers[Command.QUIT](key)) {
-        // Return false to let ctrl-C bubble up to AppContainer for exit flow.
-        // AppContainer will call cancelOngoingRequest which will cancel the tool.
         return false;
       }
       return false;
@@ -285,7 +292,7 @@ export const ToolConfirmationMessage: React.FC<
           value: ToolConfirmationOutcome.ProceedOnce,
           key: 'Allow once',
         });
-        if (isTrustedFolder) {
+        if (isTrustedFolder && !confirmationDetails.isBuildFile) {
           options.push({
             label: 'Allow for this session',
             value: ToolConfirmationOutcome.ProceedAlways,
@@ -346,7 +353,13 @@ export const ToolConfirmationMessage: React.FC<
         value: ToolConfirmationOutcome.ProceedOnce,
         key: 'Allow once',
       });
-      if (isTrustedFolder) {
+      const hasUntrustedFlags =
+        confirmationDetails.untrustedFlags &&
+        confirmationDetails.untrustedFlags.length > 0;
+      const hasModifiedBuildFiles =
+        confirmationDetails.modifiedBuildFiles &&
+        confirmationDetails.modifiedBuildFiles.length > 0;
+      if (isTrustedFolder && !hasUntrustedFlags && !hasModifiedBuildFiles) {
         options.push({
           label: `Allow for this session`,
           value: ToolConfirmationOutcome.ProceedAlways,
@@ -391,7 +404,6 @@ export const ToolConfirmationMessage: React.FC<
         key: 'No, suggest changes (esc)',
       });
     } else if (confirmationDetails.type === 'mcp') {
-      // mcp tool confirmation
       options.push({
         label: 'Allow once',
         value: ToolConfirmationOutcome.ProceedOnce,
@@ -432,6 +444,7 @@ export const ToolConfirmationMessage: React.FC<
   ]);
 
   const availableBodyContentHeight = useCallback(() => {
+    void terminalWidth;
     if (availableTerminalHeight === undefined) {
       return undefined;
     }
@@ -442,40 +455,77 @@ export const ToolConfirmationMessage: React.FC<
 
     // Calculate the vertical space (in lines) consumed by UI elements
     // surrounding the main body content.
-    const PADDING_OUTER_Y = 1; // Main container has `paddingBottom={1}`.
-    const HEIGHT_QUESTION = 1; // The question text is one line.
-    const MARGIN_QUESTION_BOTTOM = 1; // Margin on the question container.
-    const SECURITY_WARNING_BOTTOM_MARGIN = 1; // Margin on the securityWarnings container.
-    const SHOW_MORE_LINES_HEIGHT = 1; // The "Press Ctrl+O to show more lines" hint.
+    const PADDING_OUTER_Y = 0;
+    const HEIGHT_QUESTION = 1;
+    const MARGIN_QUESTION_TOP = 0;
+    const MARGIN_QUESTION_BOTTOM = 1;
+    const SECURITY_WARNING_BOTTOM_MARGIN = 1;
+    const SHOW_MORE_LINES_HEIGHT = 1;
 
     const optionsCount = getOptions().length;
 
-    // The measured height includes the margin inside WarningMessage (1 line).
-    // We also add 1 line for the marginBottom on the securityWarnings container.
-    const securityWarningsHeight = deceptiveUrlWarningText
+    const hasSecurityWarnings =
+      !!deceptiveUrlWarningText ||
+      (confirmationDetails.type === 'edit' &&
+        confirmationDetails.isBuildFile) ||
+      (confirmationDetails.type === 'exec' &&
+        ((confirmationDetails.untrustedFlags &&
+          confirmationDetails.untrustedFlags.length > 0) ||
+          (confirmationDetails.modifiedBuildFiles &&
+            confirmationDetails.modifiedBuildFiles.length > 0)));
+
+    const securityWarningsHeight = hasSecurityWarnings
       ? measuredSecurityWarningsHeight + SECURITY_WARNING_BOTTOM_MARGIN
       : 0;
+
+    let extraInfoLines = 0;
+    if (confirmationDetails.type === 'sandbox_expansion') {
+      const { additionalPermissions } = confirmationDetails;
+      if (additionalPermissions?.network) extraInfoLines++;
+      extraInfoLines += additionalPermissions?.fileSystem?.read?.length || 0;
+      extraInfoLines += additionalPermissions?.fileSystem?.write?.length || 0;
+    } else if (confirmationDetails.type === 'exec') {
+      const executionProps = confirmationDetails;
+      const commandsToDisplay =
+        executionProps.commands && executionProps.commands.length > 0
+          ? executionProps.commands
+          : [executionProps.command];
+      const containsRedirection = commandsToDisplay.some((cmd) =>
+        hasRedirection(cmd),
+      );
+      const isAutoEdit =
+        config.getApprovalMode() === ApprovalMode.YOLO ||
+        config.getApprovalMode() === ApprovalMode.AUTO_EDIT;
+      if (containsRedirection && !isAutoEdit) {
+        extraInfoLines = 1; // Warning line
+      }
+    }
 
     const surroundingElementsHeight =
       PADDING_OUTER_Y +
       HEIGHT_QUESTION +
+      MARGIN_QUESTION_TOP +
       MARGIN_QUESTION_BOTTOM +
       SHOW_MORE_LINES_HEIGHT +
       optionsCount +
-      securityWarningsHeight;
+      securityWarningsHeight +
+      extraInfoLines;
 
-    return Math.max(availableTerminalHeight - surroundingElementsHeight, 1);
+    return Math.max(availableTerminalHeight - surroundingElementsHeight, 2);
   }, [
     availableTerminalHeight,
     handlesOwnUI,
     getOptions,
     measuredSecurityWarningsHeight,
+    confirmationDetails,
+    config,
     deceptiveUrlWarningText,
+    terminalWidth,
   ]);
 
   const { question, bodyContent, options, securityWarnings, initialIndex } =
     useMemo<{
-      question: string;
+      question: React.ReactNode;
       bodyContent: React.ReactNode;
       options: Array<RadioSelectItem<ToolConfirmationOutcome>>;
       securityWarnings: React.ReactNode;
@@ -483,7 +533,7 @@ export const ToolConfirmationMessage: React.FC<
     }>(() => {
       let bodyContent: React.ReactNode | null = null;
       let securityWarnings: React.ReactNode | null = null;
-      let question = '';
+      let question: React.ReactNode = '';
       const options = getOptions();
 
       let initialIndex = 0;
@@ -512,6 +562,69 @@ export const ToolConfirmationMessage: React.FC<
         securityWarnings = <WarningMessage text={deceptiveUrlWarningText} />;
       }
 
+      if (
+        confirmationDetails.type === 'edit' &&
+        confirmationDetails.isBuildFile
+      ) {
+        const buildWarningText =
+          `⚠️ CRITICAL SECURITY WARNING: Build File Modification\n` +
+          `Target: ${confirmationDetails.fileName}\n` +
+          `Modifying build configuration files can introduce malicious rules, test runners, or dependency hooks that execute arbitrary code during subsequent commands (e.g., blaze test, npm test, make).\n` +
+          `Inspect every line of the change below carefully before approving.`;
+        securityWarnings = securityWarnings ? (
+          <>
+            {securityWarnings}
+            <WarningMessage text={buildWarningText} />
+          </>
+        ) : (
+          <WarningMessage text={buildWarningText} />
+        );
+      }
+
+      if (confirmationDetails.type === 'exec') {
+        if (
+          confirmationDetails.untrustedFlags &&
+          confirmationDetails.untrustedFlags.length > 0
+        ) {
+          const flagsWarningText =
+            `⚠️ CRITICAL SECURITY WARNING: Untrusted Command Flags Detected\n` +
+            `The following flags/arguments were sourced from external untrusted input (e.g., Buganizer ticket, external document):\n` +
+            confirmationDetails.untrustedFlags
+              .map((f) => `  • ${f}`)
+              .join('\n') +
+            `\nExecuting commands with flags sourced from untrusted input can execute arbitrary code on your machine.\n` +
+            `Carefully verify these flags before approving.`;
+          securityWarnings = securityWarnings ? (
+            <>
+              {securityWarnings}
+              <WarningMessage text={flagsWarningText} />
+            </>
+          ) : (
+            <WarningMessage text={flagsWarningText} />
+          );
+        }
+
+        if (
+          confirmationDetails.modifiedBuildFiles &&
+          confirmationDetails.modifiedBuildFiles.length > 0
+        ) {
+          const buildModWarningText =
+            `⚠️ CAUTION: Build Configuration Was Recently Modified\n` +
+            `Build file(s) (${confirmationDetails.modifiedBuildFiles.map((f) => path.basename(f)).join(', ')}) were modified earlier in this session. Running '${confirmationDetails.rootCommand}' will execute the updated build definitions.\n` +
+            `Ensure you trust all modifications made to build files before approving execution.`;
+          securityWarnings = securityWarnings ? (
+            <>
+              {securityWarnings}
+              <WarningMessage text={buildModWarningText} />
+            </>
+          ) : (
+            <WarningMessage text={buildModWarningText} />
+          );
+        }
+      }
+
+      const bodyHeight = availableBodyContentHeight();
+
       if (confirmationDetails.type === 'ask_user') {
         bodyContent = (
           <AskUserDialog
@@ -523,7 +636,7 @@ export const ToolConfirmationMessage: React.FC<
               handleConfirm(ToolConfirmationOutcome.Cancel);
             }}
             width={terminalWidth}
-            availableHeight={availableBodyContentHeight()}
+            availableHeight={bodyHeight}
           />
         );
         return {
@@ -556,7 +669,7 @@ export const ToolConfirmationMessage: React.FC<
               handleConfirm(ToolConfirmationOutcome.Cancel);
             }}
             width={terminalWidth}
-            availableHeight={availableBodyContentHeight()}
+            availableHeight={bodyHeight}
           />
         );
         return {
@@ -571,85 +684,111 @@ export const ToolConfirmationMessage: React.FC<
       if (confirmationDetails.type === 'edit') {
         if (!confirmationDetails.isModifying) {
           question = `Apply this change?`;
-        }
-      } else if (confirmationDetails.type === 'sandbox_expansion') {
-        question = `Allow sandbox expansion for: '${sanitizeForDisplay(confirmationDetails.rootCommand)}'?`;
-      } else if (confirmationDetails.type === 'exec') {
-        const executionProps = confirmationDetails;
-
-        if (executionProps.commands && executionProps.commands.length > 1) {
-          question = `Allow execution of ${executionProps.commands.length} commands?`;
-        } else {
-          question = `Allow execution of: '${sanitizeForDisplay(executionProps.rootCommand)}'?`;
-        }
-      } else if (confirmationDetails.type === 'info') {
-        question = `Do you want to proceed?`;
-      } else if (confirmationDetails.type === 'mcp') {
-        // mcp tool confirmation
-        const mcpProps = confirmationDetails;
-        question = `Allow execution of MCP tool "${sanitizeForDisplay(mcpProps.toolName)}" from server "${sanitizeForDisplay(mcpProps.serverName)}"?`;
-      }
-
-      if (confirmationDetails.type === 'edit') {
-        if (!confirmationDetails.isModifying) {
           bodyContent = (
-            <DiffRenderer
-              diffContent={stripUnsafeCharacters(confirmationDetails.fileDiff)}
-              filename={sanitizeForDisplay(confirmationDetails.fileName)}
-              availableTerminalHeight={availableBodyContentHeight()}
-              terminalWidth={terminalWidth}
-            />
+            <>
+              <Box
+                borderStyle="round"
+                borderColor={theme.border.default}
+                paddingX={1}
+                paddingY={0}
+                marginBottom={0}
+              >
+                <DiffRenderer
+                  diffContent={stripUnsafeCharacters(
+                    confirmationDetails.fileDiff,
+                  )}
+                  filename={sanitizeForDisplay(confirmationDetails.fileName)}
+                  disableTruncation={
+                    confirmationDetails.isBuildFile &&
+                    !isLockFile(confirmationDetails.fileName)
+                  }
+                  availableTerminalHeight={
+                    confirmationDetails.isBuildFile &&
+                    !isLockFile(confirmationDetails.fileName)
+                      ? undefined
+                      : bodyHeight !== undefined
+                        ? Math.max(bodyHeight - 2, 2)
+                        : undefined
+                  }
+                  terminalWidth={Math.max(terminalWidth, 1) - 4}
+                />
+              </Box>
+            </>
           );
         }
       } else if (confirmationDetails.type === 'sandbox_expansion') {
-        const { additionalPermissions } = confirmationDetails;
+        const { additionalPermissions, command } = confirmationDetails;
         const readPaths = additionalPermissions?.fileSystem?.read || [];
         const writePaths = additionalPermissions?.fileSystem?.write || [];
         const network = additionalPermissions?.network;
+        const isShell = isShellTool(toolName);
+
+        const commandNames = isShell ? 'Shell' : toolName;
+        question = '';
 
         bodyContent = (
-          <Box flexDirection="column" padding={1}>
-            <Text color={theme.text.secondary} italic>
-              The agent is requesting additional sandbox permissions to execute
-              this command:
-            </Text>
-            <Box paddingY={1}>
-              <Text color={theme.text.secondary}>
-                {sanitizeForDisplay(confirmationDetails.command)}
-              </Text>
+          <>
+            <Box
+              borderStyle="round"
+              borderColor={theme.border.default}
+              paddingX={1}
+              paddingY={0}
+              marginBottom={0}
+            >
+              {colorizeCode({
+                code: command.trim(),
+                language: 'bash',
+                maxWidth: Math.max(terminalWidth, 1) - 6,
+                settings,
+                theme: activeTheme,
+                hideLineNumbers: true,
+                availableHeight:
+                  bodyHeight !== undefined
+                    ? Math.max(bodyHeight - 2, 2)
+                    : undefined,
+              })}
             </Box>
-            {network && (
-              <Box>
-                <Text color={theme.status.warning}>• Network Access</Text>
-              </Box>
-            )}
-            {readPaths.length > 0 && (
-              <Box flexDirection="column">
-                <Text color={theme.status.success}>• Read Access:</Text>
-                {readPaths.map((p, i) => (
-                  <Text key={i} color={theme.text.secondary}>
-                    {' '}
-                    {sanitizeForDisplay(p)}
-                  </Text>
-                ))}
-              </Box>
-            )}
-            {writePaths.length > 0 && (
-              <Box flexDirection="column">
-                <Text color={theme.status.error}>• Write Access:</Text>
-                {writePaths.map((p, i) => (
-                  <Text key={i} color={theme.text.secondary}>
-                    {' '}
-                    {sanitizeForDisplay(p)}
-                  </Text>
-                ))}
-              </Box>
-            )}
-          </Box>
+            <Box flexDirection="column">
+              <Text>
+                To run{' '}
+                <Text
+                  color={isShell ? theme.status.warning : undefined}
+                  bold={isShell}
+                >
+                  [{sanitizeForDisplay(commandNames)}]
+                </Text>
+                , allow access to the following?
+              </Text>
+              {network && (
+                <Text>
+                  <Text color={isShell ? theme.status.warning : undefined} bold>
+                    • Network:
+                  </Text>{' '}
+                  All Urls
+                </Text>
+              )}
+              {writePaths.length > 0 && (
+                <Text>
+                  <Text color={isShell ? theme.status.warning : undefined} bold>
+                    • Write:
+                  </Text>{' '}
+                  {writePaths.map((p) => sanitizeForDisplay(p)).join(', ')}
+                </Text>
+              )}
+              {readPaths.length > 0 && (
+                <Text>
+                  <Text color={isShell ? theme.status.warning : undefined} bold>
+                    • Read:
+                  </Text>{' '}
+                  {readPaths.map((p) => sanitizeForDisplay(p)).join(', ')}
+                </Text>
+              )}
+            </Box>
+          </>
         );
       } else if (confirmationDetails.type === 'exec') {
         const executionProps = confirmationDetails;
-
+        const isShell = isShellTool(toolName);
         const commandsToDisplay =
           executionProps.commands && executionProps.commands.length > 1
             ? executionProps.commands
@@ -657,80 +796,90 @@ export const ToolConfirmationMessage: React.FC<
         const containsRedirection = commandsToDisplay.some((cmd) =>
           hasRedirection(cmd),
         );
+        const isAutoEdit =
+          config.getApprovalMode() === ApprovalMode.YOLO ||
+          config.getApprovalMode() === ApprovalMode.AUTO_EDIT;
 
-        let bodyContentHeight = availableBodyContentHeight();
         let warnings: React.ReactNode = null;
-
-        const isAutoEdit = config.getApprovalMode() === ApprovalMode.AUTO_EDIT;
         if (containsRedirection && !isAutoEdit) {
-          // Calculate lines needed for Note and Tip
-          const safeWidth = Math.max(terminalWidth, 1);
-          const noteLength =
-            REDIRECTION_WARNING_NOTE_LABEL.length +
-            REDIRECTION_WARNING_NOTE_TEXT.length;
-          const tipText = `Toggle auto-edit (${formatCommand(Command.CYCLE_APPROVAL_MODE)}) to allow redirection in the future.`;
-          const tipLength =
-            REDIRECTION_WARNING_TIP_LABEL.length + tipText.length;
-
-          const noteLines = Math.ceil(noteLength / safeWidth);
-          const tipLines = Math.ceil(tipLength / safeWidth);
-          const spacerLines = 1;
-          const warningHeight = noteLines + tipLines + spacerLines;
-
-          if (bodyContentHeight !== undefined) {
-            bodyContentHeight = Math.max(
-              bodyContentHeight - warningHeight,
-              MINIMUM_MAX_HEIGHT,
-            );
-          }
-
+          const tipText = `To auto-accept, press ${formatCommand(Command.CYCLE_APPROVAL_MODE)}`;
           warnings = (
-            <>
-              <Box height={1} />
-              <Box>
-                <Text color={theme.text.primary}>
-                  <Text bold>{REDIRECTION_WARNING_NOTE_LABEL}</Text>
-                  {REDIRECTION_WARNING_NOTE_TEXT}
-                </Text>
-              </Box>
-              <Box>
-                <Text color={theme.border.default}>
-                  <Text bold>{REDIRECTION_WARNING_TIP_LABEL}</Text>
-                  {tipText}
-                </Text>
-              </Box>
-            </>
+            <Box flexDirection="column" marginBottom={0}>
+              <Text color={theme.text.primary}>
+                Redirection detected.{' '}
+                <Text color={theme.text.secondary}>{tipText}</Text>
+              </Text>
+            </Box>
           );
         }
 
-        bodyContent = (
-          <Box flexDirection="column">
-            <MaxSizedBox
-              maxHeight={bodyContentHeight}
-              maxWidth={Math.max(terminalWidth, 1)}
+        const commandNames = isShell ? 'Shell' : toolName;
+
+        const allowQuestion = (
+          <Text>
+            Allow execution of{' '}
+            <Text
+              color={isShell ? theme.status.warning : undefined}
+              bold={isShell}
             >
-              <Box flexDirection="column">
-                {commandsToDisplay.map((cmd, idx) => (
-                  <Box
-                    key={idx}
-                    flexDirection="column"
-                    paddingBottom={idx < commandsToDisplay.length - 1 ? 1 : 0}
-                  >
-                    {colorizeCode({
-                      code: cmd,
-                      language: 'bash',
-                      maxWidth: Math.max(terminalWidth, 1),
-                      settings,
-                      hideLineNumbers: true,
-                    })}
-                  </Box>
-                ))}
-              </Box>
-            </MaxSizedBox>
+              [{sanitizeForDisplay(commandNames)}]
+            </Text>
+            {'?'}
+          </Text>
+        );
+
+        question = (
+          <Box flexDirection="column">
+            {allowQuestion}
             {warnings}
           </Box>
         );
+
+        bodyContent = (
+          <>
+            <Box
+              borderStyle="round"
+              borderColor={theme.border.default}
+              paddingX={1}
+              paddingY={0}
+              marginBottom={0}
+            >
+              <MaxSizedBox
+                maxHeight={
+                  bodyHeight !== undefined
+                    ? Math.max(bodyHeight - 2, 2)
+                    : undefined
+                }
+                maxWidth={Math.max(terminalWidth, 1) - 4}
+              >
+                <Box flexDirection="column">
+                  {commandsToDisplay.map((cmd, idx) => (
+                    <Box
+                      key={idx}
+                      flexDirection="column"
+                      paddingBottom={idx < commandsToDisplay.length - 1 ? 1 : 0}
+                    >
+                      {colorizeCode({
+                        code: cmd.trim(),
+                        language: 'bash',
+                        maxWidth: Math.max(terminalWidth, 1) - 6,
+                        settings,
+                        theme: activeTheme,
+                        hideLineNumbers: true,
+                        availableHeight:
+                          bodyHeight !== undefined
+                            ? Math.max(bodyHeight - 2, 2)
+                            : undefined,
+                      })}
+                    </Box>
+                  ))}
+                </Box>
+              </MaxSizedBox>
+            </Box>
+          </>
+        );
       } else if (confirmationDetails.type === 'info') {
+        question = `Do you want to proceed?`;
         const infoProps = confirmationDetails;
         const displayUrls =
           infoProps.urls &&
@@ -761,8 +910,8 @@ export const ToolConfirmationMessage: React.FC<
           </Box>
         );
       } else if (confirmationDetails.type === 'mcp') {
-        // mcp tool confirmation
         const mcpProps = confirmationDetails;
+        question = `Allow execution of MCP tool "${sanitizeForDisplay(mcpProps.toolName)}" from server "${sanitizeForDisplay(mcpProps.serverName)}"?`;
 
         bodyContent = (
           <Box flexDirection="column">
@@ -783,7 +932,26 @@ export const ToolConfirmationMessage: React.FC<
                       (press {expandDetailsHintKey} to collapse MCP tool
                       details)
                     </Text>
-                    <Text color={theme.text.link}>{mcpToolDetailsText}</Text>
+                    <Box
+                      borderStyle="round"
+                      borderColor={theme.border.default}
+                      paddingX={1}
+                      paddingY={0}
+                      marginBottom={0}
+                    >
+                      {colorizeCode({
+                        code: mcpToolDetailsText || '',
+                        language: 'json',
+                        maxWidth: Math.max(terminalWidth, 1) - 4,
+                        settings,
+                        theme: activeTheme,
+                        hideLineNumbers: true,
+                        availableHeight:
+                          bodyHeight !== undefined
+                            ? Math.max(bodyHeight - 2, 2)
+                            : undefined,
+                      })}
+                    </Box>
                   </>
                 ) : (
                   <Text color={theme.text.secondary}>
@@ -812,13 +980,39 @@ export const ToolConfirmationMessage: React.FC<
       isTrustedFolder,
       allowPermanentApproval,
       settings,
+      activeTheme,
       config,
+      toolName,
     ]);
 
   const bodyOverflowDirection: 'top' | 'bottom' =
     confirmationDetails.type === 'mcp' && isMcpToolDetailsExpanded
       ? 'bottom'
       : 'top';
+
+  const renderRadioItem = useCallback(
+    (
+      item: RadioSelectItem<ToolConfirmationOutcome>,
+      { titleColor }: { titleColor: string },
+    ) => {
+      if (item.value === ToolConfirmationOutcome.ProceedAlwaysAndSave) {
+        return (
+          <Text color={titleColor} wrap="truncate">
+            {item.label}{' '}
+            <Text color={theme.text.secondary}>
+              ~/.gemini/policies/auto-saved.toml
+            </Text>
+          </Text>
+        );
+      }
+      return (
+        <Text color={titleColor} wrap="truncate">
+          {item.label}
+        </Text>
+      );
+    },
+    [],
+  );
 
   if (confirmationDetails.type === 'edit') {
     if (confirmationDetails.isModifying) {
@@ -842,13 +1036,8 @@ export const ToolConfirmationMessage: React.FC<
   }
 
   return (
-    <Box
-      flexDirection="column"
-      paddingTop={0}
-      paddingBottom={handlesOwnUI ? 0 : 1}
-    >
-      {/* System message from hook */}
-      {confirmationDetails.systemMessage && (
+    <Box flexDirection="column" paddingTop={0} paddingBottom={0}>
+      {!!confirmationDetails.systemMessage && (
         <Box marginBottom={1}>
           <Text color={theme.status.warning}>
             {confirmationDetails.systemMessage}
@@ -860,9 +1049,19 @@ export const ToolConfirmationMessage: React.FC<
         bodyContent
       ) : (
         <>
-          <Box flexGrow={1} flexShrink={1} overflow="hidden">
+          <Box
+            flexShrink={1}
+            overflow="hidden"
+            marginBottom={!question && !securityWarnings ? 1 : 0}
+          >
             <MaxSizedBox
-              maxHeight={availableBodyContentHeight()}
+              maxHeight={
+                confirmationDetails.type === 'edit' &&
+                confirmationDetails.isBuildFile &&
+                !isLockFile(confirmationDetails.fileName)
+                  ? undefined
+                  : availableBodyContentHeight()
+              }
               maxWidth={terminalWidth}
               overflowDirection={bodyOverflowDirection}
             >
@@ -880,9 +1079,15 @@ export const ToolConfirmationMessage: React.FC<
             </Box>
           )}
 
-          <Box marginBottom={1} flexShrink={0}>
-            <Text color={theme.text.primary}>{question}</Text>
-          </Box>
+          {!!question && (
+            <Box marginBottom={1} flexShrink={0}>
+              {typeof question === 'string' ? (
+                <Text color={theme.text.primary}>{question}</Text>
+              ) : (
+                question
+              )}
+            </Box>
+          )}
 
           <Box flexShrink={0}>
             <RadioButtonSelect
@@ -890,6 +1095,7 @@ export const ToolConfirmationMessage: React.FC<
               onSelect={handleSelect}
               isFocused={isFocused}
               initialIndex={initialIndex}
+              renderItem={renderRadioItem}
             />
           </Box>
         </>

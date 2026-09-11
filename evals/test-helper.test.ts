@@ -49,6 +49,8 @@ describe('evalTest reliability logic', () => {
 
     // Execute the test function directly
     await internalEvalTest({
+      suiteName: 'test',
+      suiteType: 'behavioral',
       name: 'test-api-failure',
       prompt: 'do something',
       assert: async () => {},
@@ -83,6 +85,8 @@ describe('evalTest reliability logic', () => {
     // Expect the test function to throw immediately
     await expect(
       internalEvalTest({
+        suiteName: 'test',
+        suiteType: 'behavioral',
         name: 'test-logic-failure',
         prompt: 'do something',
         assert: async () => {
@@ -108,6 +112,8 @@ describe('evalTest reliability logic', () => {
       .mockResolvedValueOnce('Success');
 
     await internalEvalTest({
+      suiteName: 'test',
+      suiteType: 'behavioral',
       name: 'test-recovery',
       prompt: 'do something',
       assert: async () => {},
@@ -135,6 +141,8 @@ describe('evalTest reliability logic', () => {
     );
 
     await internalEvalTest({
+      suiteName: 'test',
+      suiteType: 'behavioral',
       name: 'test-api-503',
       prompt: 'do something',
       assert: async () => {},
@@ -162,6 +170,8 @@ describe('evalTest reliability logic', () => {
     try {
       await expect(
         internalEvalTest({
+          suiteName: 'test',
+          suiteType: 'behavioral',
           name: 'test-absolute-path',
           prompt: 'do something',
           files: {
@@ -190,6 +200,8 @@ describe('evalTest reliability logic', () => {
     try {
       await expect(
         internalEvalTest({
+          suiteName: 'test',
+          suiteType: 'behavioral',
           name: 'test-traversal',
           prompt: 'do something',
           files: {
@@ -202,6 +214,111 @@ describe('evalTest reliability logic', () => {
       if (fs.existsSync(mockRig.testDir)) {
         fs.rmSync(mockRig.testDir, { recursive: true, force: true });
       }
+    }
+  });
+
+  it('should append tool call chain to assertion failure error messages', async () => {
+    const mockRig = {
+      setup: vi.fn(),
+      run: vi.fn(),
+      cleanup: vi.fn(),
+      readToolLogs: vi.fn().mockReturnValue([]),
+      _lastRunStderr: '',
+    } as any;
+    (TestRig as any).mockReturnValue(mockRig);
+
+    mockRig.run.mockResolvedValue('Success');
+    mockRig.readToolLogs.mockReturnValue([
+      {
+        toolRequest: {
+          name: 'grep_search',
+          args: '{"query":"TODO"}',
+          success: true,
+          duration_ms: 42,
+        },
+      },
+      {
+        toolRequest: {
+          name: 'read_file',
+          args: '{"path":"/src/foo.ts"}',
+          success: false,
+          duration_ms: 15,
+          error: 'File not found',
+          error_type: 'ENOENT',
+        },
+      },
+    ]);
+
+    const assertionError = new Error('Expected tool to be called');
+
+    try {
+      await internalEvalTest({
+        suiteName: 'test',
+        suiteType: 'behavioral',
+        name: 'test-tool-chain',
+        prompt: 'do something',
+        assert: async () => {
+          throw assertionError;
+        },
+      });
+      expect.unreachable('Expected internalEvalTest to throw');
+    } catch (error: unknown) {
+      expect(error).toBeInstanceOf(Error);
+      const msg = (error as Error).message;
+      expect(msg).toContain('Expected tool to be called');
+      expect(msg).toContain('Tool Call Chain (2 calls)');
+      expect(msg).toContain('grep_search');
+      expect(msg).toContain('read_file');
+      expect(msg).toContain('[ENOENT] File not found');
+    }
+  });
+
+  it('should not crash when error.message is read-only (frozen error)', async () => {
+    const mockRig = {
+      setup: vi.fn(),
+      run: vi.fn(),
+      cleanup: vi.fn(),
+      readToolLogs: vi.fn(),
+      _lastRunStderr: '',
+    } as any;
+    (TestRig as any).mockReturnValue(mockRig);
+
+    mockRig.run.mockResolvedValue('Success');
+    mockRig.readToolLogs.mockReturnValue([
+      {
+        toolRequest: {
+          name: 'read_file',
+          args: '{"path":"/foo.ts"}',
+          success: true,
+          duration_ms: 10,
+        },
+      },
+    ]);
+
+    // Simulate a frozen error whose message property cannot be mutated
+    const frozenError = Object.freeze(new Error('Frozen assertion error'));
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await expect(
+        internalEvalTest({
+          suiteName: 'test',
+          suiteType: 'behavioral',
+          name: 'test-frozen-error',
+          prompt: 'do something',
+          assert: async () => {
+            throw frozenError;
+          },
+        }),
+      ).rejects.toThrow('Frozen assertion error');
+
+      // Should have warned that the message could not be mutated
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Could not append tool call chain'),
+      );
+    } finally {
+      warnSpy.mockRestore();
     }
   });
 });
